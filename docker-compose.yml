@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  selenium-bot:
+    build: .
+    platform: linux/amd64
+    ports:
+      - "8080:8080"  # noVNC web interface
+      - "5900:5900"  # VNC port (optional, for VNC clients)
+    volumes:
+      - ./.env:/app/.env:ro  # Mount .env file as read-only
+      - ./browser:/app/browser  # Mount browser directory for persistence
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=:99
+      - VNC_PASSWORD=seleniumvnc  # VNC password (change this in production)
+    shm_size: "2gb"  # Increase shared memory for Chrome
+    networks:
+      - selenium-net
+
+networks:
+  selenium-net:
+    driver: bridge
