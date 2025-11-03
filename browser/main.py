@@ -3,7 +3,11 @@ import json
 from dotenv import load_dotenv
 import anthropic
 from selenium import webdriver
-import logging
+from selenium.common.exceptions import NoSuchElementException
+import time
+import re
+import json
+
 # Load environment variables immediately at import time so os.getenv() works anywhere in this module
 load_dotenv()
 
@@ -91,8 +95,8 @@ async def main(state):
 
     # Call the API with the full message history
     try:
-        if len(state.messages) >30:
-            messages = state.get_messages()[-30:]
+        if len(state.messages) >10:
+            messages = state.get_messages()[-10:]
         else:
             messages = state.get_messages()
         # Build API call params, including system prompt if set
@@ -103,6 +107,9 @@ async def main(state):
         }
         if state.system_prompt:
             params["system"] = state.system_prompt + f" The current page content is: {state.current_page}"
+        print("########################")
+        print(params)
+        print("########################")
         resp = client.messages.create(**params)
 
         # extract assistant reply (API returns content array)
@@ -116,15 +123,54 @@ async def main(state):
         print(f"An error occurred: {e}")
         raise
 
+def wait_for_user_to_solve_captcha(driver, wait_time=300):
+    """Pause while user solves a CAPTCHA and return updated page source."""
+    start_time = time.time()
+    print("🧩 CAPTCHA detected — please solve it manually.")
+    print("Waiting up to 5 minutes...")
 
+    while time.time() - start_time < wait_time:
+        time.sleep(5)
+        if not any(tag in driver.page_source for tag in ["recaptcha", "hcaptcha"]):
+            print("✅ CAPTCHA solved or disappeared.")
+            return driver.page_source
+    print("⚠️ Timeout waiting for CAPTCHA to be solved.")
+    return driver.page_source
+
+
+def extract_json_from_text(text: str):
+    """
+    Extract the first valid JSON object from a messy text string.
+    Handles ```json ... ``` blocks and plain {...} inline JSON.
+    """
+    # 1️⃣ Try to find a fenced code block like ```json { ... } ```
+    print(text)
+    match = re.search(r"```json\s*({.*?})\s*```", text, re.DOTALL)
+    if not match:
+        # 2️⃣ Fallback: any standalone {...} JSON
+        match = re.search(r"(\{.*\})", text, re.DOTALL)
+    
+    if not match:
+        raise ValueError("No JSON object found in text")
+
+    json_str = match.group(1).strip()
+    
+    # 3️⃣ Try to parse it safely
+    try:
+        data = json.loads(json_str)
+        return data
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON found: {e}")
+    
 if __name__ == "__main__":
     # safe debug: show whether key loaded (do not print the key itself)
     print("API Key loaded:", bool(API_KEY))
     import asyncio
-    prompt = "go to google.com, search for wayfair, search for a red couch. get me the cheapest link"
+    prompt = "go to google.com, go to the wayfair website in the search results and then search for red couch in the page" \
+            
     # example usage: prompt and optional persistence file
-    state = MessagesState(system_prompt= "break down the prompt into tasks doable on selenium. " \
-    "if all taks are done return \{ \"task\":\"\" , \"code\":\"\",\"content\":\"DONE\" \} " \
+    state = MessagesState(system_prompt= "break down the prompt into tasks doable on selenium. dont open new tabs." \
+    "if all taks are done return \{ \"task\":\"\" , \"code\":\"\",\"content\":\"DONE\" \} ." \
     "otherwise return one line of executable selenium code for only the next task based on the current page or fix any errors and try to run again .  return json object and nothing else." \
     "follow the following format: \{ \"task\":\"the next task to be performed or errors that need to be fixed\" , \"code\":\"the code to execute the next task\",\"content\":\"any content extracted from the website\" \} " , persist_path="./history.json")
     state.add_user(prompt)
@@ -133,7 +179,7 @@ if __name__ == "__main__":
         asyncio.run(main(state))
         raw_output = state.messages[-1]['content'].strip().replace('\n','').replace('```','')[4:] 
         # 6️⃣ Parse the JSON output safely
-        data = json.loads(raw_output)
+        data = extract_json_from_text(raw_output)
         state.task,state.code,state.content = data['task'],data['code'],data['content']
         try:
             print("Executing code block:\n",state.code)
@@ -143,7 +189,13 @@ if __name__ == "__main__":
                     eval(code)
         except Exception as e:
             print(f"An error occurred during code execution: {e}")
-            state.add_user(f"An error occurred during code execution: {e}")
+            state.add_user(f"An error occurred during code execution: {e} , please give valid python code")
         state.current_page = driver.page_source
-        
+        for captcha_type in ["recaptcha", "hcaptcha"]:
+            try:
+                driver.find_element("xpath", f"//iframe[contains(@src, '{captcha_type}')]")
+                state.current_page = wait_for_user_to_solve_captcha(driver)
+            except NoSuchElementException:
+                pass
+        state.current_page = state.current_page[1:100000] 
 
